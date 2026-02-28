@@ -294,19 +294,23 @@
             qrContainer.style.display = 'flex';
             const broadcastUrl = window.location.origin + window.location.pathname + "?role=broadcaster";
 
-            // Clear inside in case we recall
-            document.getElementById("qrcode").innerHTML = "";
-            new QRCode(document.getElementById("qrcode"), {
-                text: broadcastUrl,
-                width: 256,
-                height: 256,
-                colorDark: "#000000",
-                colorLight: "#ffffff",
-                correctLevel: QRCode.CorrectLevel.H
-            });
+            try {
+                // Clear inside in case we recall
+                const qrcodeContainer = document.getElementById("qrcode");
+                qrcodeContainer.innerHTML = "";
 
-            statusEl.innerText = "Waiting for phone to scan QR code...";
-            connectWebSocket();
+                // Use robust external API for QR instead of relying on client-side JS that adblockers block
+                const qrImgUrl = "https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=" + encodeURIComponent(broadcastUrl);
+                const img = document.createElement("img");
+                img.src = qrImgUrl;
+                qrcodeContainer.appendChild(img);
+
+                statusEl.innerText = "Waiting for phone to scan QR code...";
+                connectWebSocket();
+            } catch (err) {
+                statusEl.innerText = "Error starting viewer: " + err.message;
+                statusEl.style.color = "red";
+            }
         }
 
         // Initialize based on URL params
