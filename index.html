@@ -57,6 +57,14 @@
             min-height: 20px;
         }
 
+        .latency-box {
+            margin-top: 10px;
+            font-size: 1.1em;
+            color: #ff7b72;
+            font-weight: bold;
+            display: none;
+        }
+
         #qr-container {
             display: none;
             flex-direction: column;
@@ -94,6 +102,7 @@
         <video id="videoElement" autoplay playsinline muted></video>
 
         <div class="status" id="status">Starting...</div>
+        <div class="latency-box" id="latency">Latency: -- ms</div>
     </div>
 
     <script>
@@ -105,7 +114,9 @@
         const statusEl = document.getElementById('status');
         const qrContainer = document.getElementById('qr-container');
         const titleEl = document.getElementById('title');
+        const latencyEl = document.getElementById('latency');
 
+        let latencyInterval = null;
         let role = null;
         let localStream = null;
 
@@ -202,6 +213,26 @@
                             videoElement.play().catch(console.error);
                             statusEl.innerText = "Live! Connected to phone camera. (Video muted to allow auto-play)";
                             statusEl.style.color = "#2ea043";
+                            latencyEl.style.display = "block";
+
+                            // Start measuring latency every second
+                            if (latencyInterval) clearInterval(latencyInterval);
+                            latencyInterval = setInterval(async () => {
+                                if (viewerPC && viewerPC.connectionState === 'connected') {
+                                    const stats = await viewerPC.getStats();
+                                    let rtt = null;
+                                    stats.forEach(report => {
+                                        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+                                            if (report.currentRoundTripTime !== undefined) {
+                                                rtt = (report.currentRoundTripTime * 1000).toFixed(1);
+                                            }
+                                        }
+                                    });
+                                    if (rtt) {
+                                        latencyEl.innerText = "Network Latency: " + rtt + " ms";
+                                    }
+                                }
+                            }, 1000);
                         };
 
                         viewerPC.onicecandidate = e => {
@@ -220,6 +251,8 @@
                                 statusEl.style.color = "red";
                                 videoElement.style.display = 'none';
                                 qrContainer.style.display = 'flex'; // Show QR again
+                                latencyEl.style.display = 'none';
+                                if (latencyInterval) clearInterval(latencyInterval);
                             }
                         };
 
@@ -238,7 +271,9 @@
                         if (viewerPC) viewerPC.close();
                         videoElement.srcObject = null;
                         videoElement.style.display = 'none';
+                        latencyEl.style.display = 'none';
                         qrContainer.style.display = 'flex'; // Show QR again
+                        if (latencyInterval) clearInterval(latencyInterval);
 
                     } else if (msg.type === 'error') {
                         statusEl.innerText = msg.message;
