@@ -91,7 +91,7 @@
             <div id="qrcode"></div>
         </div>
 
-        <video id="videoElement" autoplay playsinline></video>
+        <video id="videoElement" autoplay playsinline muted></video>
 
         <div class="status" id="status">Starting...</div>
     </div>
@@ -163,12 +163,15 @@
                         };
 
                         const offer = await pc.createOffer();
-                        await pc.setLocalDescription(offer);
+
+                        // Send offer before generating candidates via setLocalDescription to avoid UDP/WS race conditions
                         ws.send(JSON.stringify({
                             type: 'offer',
                             target_id: viewerId,
-                            sdp: pc.localDescription
+                            sdp: offer
                         }));
+
+                        await pc.setLocalDescription(offer);
 
                     } else if (msg.type === 'answer') {
                         const pc = peerConnections[msg.viewer_id];
@@ -196,7 +199,8 @@
 
                         viewerPC.ontrack = e => {
                             videoElement.srcObject = e.streams[0];
-                            statusEl.innerText = "Live! Connected to phone camera.";
+                            videoElement.play().catch(console.error);
+                            statusEl.innerText = "Live! Connected to phone camera. (Video muted to allow auto-play)";
                             statusEl.style.color = "#2ea043";
                         };
 
@@ -221,9 +225,9 @@
 
                         await viewerPC.setRemoteDescription(new RTCSessionDescription(msg.sdp));
                         const answer = await viewerPC.createAnswer();
-                        await viewerPC.setLocalDescription(answer);
 
-                        ws.send(JSON.stringify({ type: 'answer', sdp: viewerPC.localDescription }));
+                        ws.send(JSON.stringify({ type: 'answer', sdp: answer }));
+                        await viewerPC.setLocalDescription(answer);
 
                     } else if (msg.type === 'candidate') {
                         if (viewerPC) await viewerPC.addIceCandidate(new RTCIceCandidate(msg.candidate));
