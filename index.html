@@ -59,10 +59,14 @@
 
         .latency-box {
             margin-top: 10px;
-            font-size: 1.1em;
+            font-size: 1em;
             color: #ff7b72;
-            font-weight: bold;
             display: none;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 10px;
+            border-radius: 8px;
+            text-align: left;
+            line-height: 1.5;
         }
 
         #qr-container {
@@ -220,16 +224,38 @@
                             latencyInterval = setInterval(async () => {
                                 if (viewerPC && viewerPC.connectionState === 'connected') {
                                     const stats = await viewerPC.getStats();
-                                    let rtt = null;
+
+                                    let networkRtt = null;
+                                    let videoJitter = null;
+                                    let totalLatency = null;
+
                                     stats.forEach(report => {
+                                        // 1. Ağ (Network) gecikmesi (Ping / STUN)
                                         if (report.type === 'candidate-pair' && report.state === 'succeeded') {
                                             if (report.currentRoundTripTime !== undefined) {
-                                                rtt = (report.currentRoundTripTime * 1000).toFixed(1);
+                                                networkRtt = (report.currentRoundTripTime * 1000).toFixed(1);
+                                            }
+                                        }
+
+                                        // 2. Video akış gecikmesi (Jitter Buffer Delay & Decode time)
+                                        if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                                            if (report.jitterBufferDelay !== undefined && report.jitterBufferEmittedCount !== undefined) {
+                                                const jitterDelayMs = (report.jitterBufferDelay / report.jitterBufferEmittedCount) * 1000;
+                                                videoJitter = jitterDelayMs.toFixed(1);
                                             }
                                         }
                                     });
-                                    if (rtt) {
-                                        latencyEl.innerText = "Network Latency: " + rtt + " ms";
+
+                                    let html = "";
+                                    if (networkRtt) html += `<b>Network Latency (RTT):</b> ${networkRtt} ms<br>`;
+                                    if (videoJitter && !isNaN(videoJitter)) {
+                                        let estimatedTotal = (parseFloat(networkRtt || 0) / 2) + parseFloat(videoJitter);
+                                        html += `<b>Video Jitter Buffer:</b> ${videoJitter} ms<br>`;
+                                        html += `<b>Estimated Stream Delay:</b> ~${estimatedTotal.toFixed(1)} ms`;
+                                    }
+
+                                    if (html !== "") {
+                                        latencyEl.innerHTML = html;
                                     }
                                 }
                             }, 1000);
