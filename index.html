@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Phone to Web</title>
+    <style>
+        :root {
+            --bg-color: #0d1117;
+            --text-color: #c9d1d9;
+            --accent-color: #58a6ff;
+            --card-bg: #161b22;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+        }
+
+        h1 {
+            font-weight: 300;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .container {
+            background-color: var(--card-bg);
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+            text-align: center;
+            width: 100%;
+            max-width: 800px;
+        }
+
+        video {
+            width: 100%;
+            max-width: 100%;
+            border-radius: 8px;
+            background-color: #000;
+            display: none;
+        }
+
+        .status {
+            margin-top: 15px;
+            font-size: 0.9em;
+            color: #8b949e;
+            min-height: 20px;
+        }
+
+        #qr-container {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            margin-top: 20px;
+        }
+
+        #qrcode {
+            margin: 20px;
+            padding: 15px;
+            background: white;
+            border-radius: 8px;
+        }
+
+        .instruction {
+            font-size: 1.1em;
+            color: #8b949e;
+            margin-bottom: 10px;
+        }
+    </style>
+    <!-- Include QRCode.js for generating QR code -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+
+<body>
+
+    <div class="container">
+        <h1 id="title">WebRTC Live Stream</h1>
+
+        <div id="qr-container">
+            <p class="instruction">Scan this QR code with your phone to start broadcasting your camera</p>
+            <div id="qrcode"></div>
+        </div>
+
+        <video id="videoElement" autoplay playsinline></video>
+
+        <div class="status" id="status">Starting...</div>
+    </div>
+
+    <script>
+        const wsProtocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
+        const wsUrl = wsProtocol + location.host + '/ws';
+        let ws;
+
+        const videoElement = document.getElementById('videoElement');
+        const statusEl = document.getElementById('status');
+        const qrContainer = document.getElementById('qr-container');
+        const titleEl = document.getElementById('title');
+
+        let role = null;
+        let localStream = null;
+
+        const rtcConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                // Add TURN servers to bypass Mobile Network (Symmetric NAT) firewalls
+                {
+                    urls: 'turn:openrelay.metered.ca:80',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                }
+            ]
+        };
+
+        const peerConnections = {};
+        let viewerPC = null;
+
+        function connectWebSocket() {
+            ws = new WebSocket(wsUrl);
+
+            ws.onmessage = async (event) => {
+                const msg = JSON.parse(event.data);
+
+                if (role === 'broadcaster') {
+                    if (msg.type === 'new_viewer') {
+                        const viewerId = msg.viewer_id;
+                        statusEl.innerText = `Viewers connected. Broadcasting live.`;
+
+                        const pc = new RTCPeerConnection(rtcConfig);
+                        peerConnections[viewerId] = pc;
+
+                        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+                        pc.onicecandidate = e => {
+                            if (e.candidate) {
+                                ws.send(JSON.stringify({
+                                    type: 'candidate',
+                                    target: 'viewer',
+                                    target_id: viewerId,
+                                    candidate: e.candidate
+                                }));
+                            }
+                        };
+
+                        const offer = await pc.createOffer();
+                        await pc.setLocalDescription(offer);
+                        ws.send(JSON.stringify({
+                            type: 'offer',
+                            target_id: viewerId,
+                            sdp: pc.localDescription
+                        }));
+
+                    } else if (msg.type === 'answer') {
+                        const pc = peerConnections[msg.viewer_id];
+                        if (pc) await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+
+                    } else if (msg.type === 'candidate') {
+                        const pc = peerConnections[msg.viewer_id];
+                        if (pc) await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+
+                    } else if (msg.type === 'viewer_disconnected') {
+                        const pc = peerConnections[msg.viewer_id];
+                        if (pc) {
+                            pc.close();
+                            delete peerConnections[msg.viewer_id];
+                        }
+                    }
+
+                } else if (role === 'viewer') {
+                    if (msg.type === 'offer') {
+                        qrContainer.style.display = 'none'; // Hide QR when stream arrives
+                        videoElement.style.display = 'block';
+                        statusEl.innerText = "Receiving stream offer...";
+
+                        viewerPC = new RTCPeerConnection(rtcConfig);
+
+                        viewerPC.ontrack = e => {
+                            videoElement.srcObject = e.streams[0];
+                            statusEl.innerText = "Live! Connected to phone camera.";
+                            statusEl.style.color = "#2ea043";
+                        };
+
+                        viewerPC.onicecandidate = e => {
+                            if (e.candidate) {
+                                ws.send(JSON.stringify({
+                                    type: 'candidate',
+                                    target: 'broadcaster',
+                                    candidate: e.candidate
+                                }));
+                            }
+                        };
+
+                        viewerPC.onconnectionstatechange = () => {
+                            if (viewerPC.connectionState === 'disconnected' || viewerPC.connectionState === 'failed') {
+                                statusEl.innerText = "Stream disconnected. Waiting for broadcaster...";
+                                statusEl.style.color = "red";
+                                videoElement.style.display = 'none';
+                                qrContainer.style.display = 'flex'; // Show QR again
+                            }
+                        };
+
+                        await viewerPC.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+                        const answer = await viewerPC.createAnswer();
+                        await viewerPC.setLocalDescription(answer);
+
+                        ws.send(JSON.stringify({ type: 'answer', sdp: viewerPC.localDescription }));
+
+                    } else if (msg.type === 'candidate') {
+                        if (viewerPC) await viewerPC.addIceCandidate(new RTCIceCandidate(msg.candidate));
+
+                    } else if (msg.type === 'broadcaster_disconnected') {
+                        statusEl.innerText = "Phone disconnected. Waiting for connection...";
+                        statusEl.style.color = "orange";
+                        if (viewerPC) viewerPC.close();
+                        videoElement.srcObject = null;
+                        videoElement.style.display = 'none';
+                        qrContainer.style.display = 'flex'; // Show QR again
+
+                    } else if (msg.type === 'error') {
+                        statusEl.innerText = msg.message;
+                        statusEl.style.color = "orange";
+                    }
+                }
+            };
+
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                if (role === 'broadcaster') {
+                    ws.send(JSON.stringify({ type: 'register_broadcaster' }));
+                } else if (role === 'viewer') {
+                    ws.send(JSON.stringify({ type: 'register_viewer' }));
+                }
+            };
+
+            ws.onclose = () => {
+                if (role) {
+                    statusEl.innerText = "Disconnected from server. Reconnecting...";
+                    statusEl.style.color = "red";
+                    setTimeout(connectWebSocket, 3000);
+                }
+            };
+        }
+
+        async function startBroadcaster() {
+            role = 'broadcaster';
+            titleEl.innerText = "Phone Camera Streaming";
+            videoElement.style.display = 'block';
+            videoElement.muted = true; // Don't feedback
+            qrContainer.style.display = 'none';
+
+            try {
+                statusEl.innerText = "Requesting camera access...";
+                // Prefer back camera
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment' },
+                    audio: true
+                });
+                videoElement.srcObject = localStream;
+                statusEl.innerText = "Broadcasting... Waiting for viewers.";
+                statusEl.style.color = "#58a6ff";
+
+                connectWebSocket();
+            } catch (err) {
+                statusEl.innerText = "Error accessing camera: " + err.message;
+                statusEl.style.color = "red";
+            }
+        }
+
+        function startViewer() {
+            role = 'viewer';
+            titleEl.innerText = "Viewer Display";
+
+            // Show QR code for phone to scan
+            qrContainer.style.display = 'flex';
+            const broadcastUrl = window.location.origin + window.location.pathname + "?role=broadcaster";
+
+            // Clear inside in case we recall
+            document.getElementById("qrcode").innerHTML = "";
+            new QRCode(document.getElementById("qrcode"), {
+                text: broadcastUrl,
+                width: 256,
+                height: 256,
+                colorDark: "#000000",
+                colorLight: "#ffffff",
+                correctLevel: QRCode.CorrectLevel.H
+            });
+
+            statusEl.innerText = "Waiting for phone to scan QR code...";
+            connectWebSocket();
+        }
+
+        // Initialize based on URL params
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('role') === 'broadcaster') {
+            startBroadcaster();
+        } else {
+            startViewer();
+        }
+    </script>
+</body>
+
+</html>
