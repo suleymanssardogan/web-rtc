@@ -3,3 +3,4 @@ uvicorn
 websockets
 # LiveKit Python Server SDK (JWT Token üretmek için)
 livekit-api
+python-dotenv

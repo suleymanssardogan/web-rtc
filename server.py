@@ -5,12 +5,16 @@ from fastapi.responses import HTMLResponse
 import uvicorn
 from livekit.api import AccessToken, VideoGrants
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 
 # LiveKit connection details (In production, load these from secure environment variables)
-LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "APIE49GebhLn6m6")
-LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "jLuc2dGesx5nkPYenbhH2igJa9CeKP5aRd0GtcqrXvlA")
+LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY")
+LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET")
 
 @app.get("/")
 async def get():
@@ -33,7 +37,7 @@ async def get_token(role: str):
         .with_grants(grant)
         
     # Get the LiveKit Server URL from environment variable, default to local if not set
-    livekit_url = os.environ.get("LIVEKIT_URL", "wss://web-rtc-svlxr05v.livekit.cloud")
+    livekit_url = os.environ.get("LIVEKIT_URL")
         
     return {
         "token": access_token.to_jwt(),

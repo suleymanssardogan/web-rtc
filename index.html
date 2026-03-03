@@ -192,7 +192,9 @@
                             const strData = JSON.stringify({ type: 'ping', t: Date.now() });
                             const encoder = new TextEncoder();
                             room.localParticipant.publishData(encoder.encode(strData), { reliable: false });
-                        } catch (e) { }
+                        } catch (e) {
+                            console.error("Ping error:", e);
+                        }
                     }
                 }, 1000);
             }
@@ -215,9 +217,14 @@
                         if (e2ePings.length > 3) e2ePings.shift();
                         const avgE2e = Math.round(e2ePings.reduce((a, b) => a + b, 0) / e2ePings.length);
 
-                        e2eVal.innerText = avgE2e + ' ms';
+                        // Gerçek video gecikmesi tek yönlüdür (Ping/Pong ise gidiş-dönüş = RTT)
+                        const oneWayDelay = Math.round(avgE2e / 2);
+
+                        document.getElementById('e2e-val').innerText = `${oneWayDelay} ms (Gidiş-Dönüş: ${avgE2e}ms)`;
                     }
-                } catch (e) { }
+                } catch (e) {
+                    console.error("DataReceived err:", e);
+                }
             });
 
             // WebRTC RTCStats polling
@@ -233,8 +240,13 @@
 
                 try {
                     let pc = null;
-                    if (room.engine && room.engine.pcManager) {
-                        pc = role === 'broadcaster' ? room.engine.pcManager.publisher.pc : room.engine.pcManager.subscriber.pc;
+                    if (room.engine) {
+                        // Fallbacks for different livekit-client versions
+                        let publisher = room.engine.publisher || (room.engine.pcManager && room.engine.pcManager.publisher);
+                        let subscriber = room.engine.subscriber || (room.engine.pcManager && room.engine.pcManager.subscriber);
+
+                        pc = role === 'broadcaster' && publisher ? publisher.pc :
+                            role === 'viewer' && subscriber ? subscriber.pc : null;
                     }
 
                     if (pc) {
@@ -257,7 +269,7 @@
                             }
                         });
 
-                        if (rtt > 0) document.getElementById('rtt-val').innerText = Math.round(rtt) + ' ms';
+                        document.getElementById('rtt-val').innerText = rtt > 0 ? Math.round(rtt) + ' ms' : '-';
                         if (jitter > 0) document.getElementById('jitter-val').innerText = jitter.toFixed(2) + ' ms';
                         if (packetsLost !== undefined) document.getElementById('loss-val').innerText = packetsLost;
 
@@ -265,8 +277,12 @@
                         if (width > 0 && height > 0) qStr = `${width}x${height}`;
                         if (fps > 0) qStr += ` @ ${fps.toFixed(1)} FPS`;
                         if (qStr !== '-') document.getElementById('fps-val').innerText = qStr;
+                    } else {
+                        console.warn("Could not find RTCPeerConnection object to get stats!");
                     }
-                } catch (e) { }
+                } catch (e) {
+                    console.error("Stats loop exception:", e);
+                }
             }, 1000);
         }
 
