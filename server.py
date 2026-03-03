@@ -9,8 +9,8 @@ app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 
 # LiveKit connection details (In production, load these from secure environment variables)
-LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "devkey")
-LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "secret")
+LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "APIE49GebhLn6m6")
+LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "jLuc2dGesx5nkPYenbhH2igJa9CeKP5aRd0GtcqrXvlA")
 
 @app.get("/")
 async def get():
@@ -33,7 +33,7 @@ async def get_token(role: str):
         .with_grants(grant)
         
     # Get the LiveKit Server URL from environment variable, default to local if not set
-    livekit_url = os.environ.get("LIVEKIT_URL", "ws://127.0.0.1:7880")
+    livekit_url = os.environ.get("LIVEKIT_URL", "wss://web-rtc-svlxr05v.livekit.cloud")
         
     return {
         "token": access_token.to_jwt(),
