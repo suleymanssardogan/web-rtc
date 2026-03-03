@@ -76,6 +76,43 @@
             color: #8b949e;
             margin-bottom: 10px;
         }
+
+        #stats-container {
+            display: none;
+            background-color: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+            font-size: 0.85em;
+            text-align: left;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            border-bottom: 1px solid #21262d;
+            padding-bottom: 4px;
+        }
+
+        .stat-row:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+
+        .stat-label {
+            color: #8b949e;
+        }
+
+        .stat-value {
+            color: #7ee787;
+            font-weight: bold;
+        }
     </style>
     <!-- Include QRCode.js for generating QR code -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
@@ -96,6 +133,30 @@
         <video id="videoElement" autoplay playsinline muted></video>
 
         <div class="status" id="status">Starting...</div>
+
+        <div id="stats-container">
+            <div class="stat-row">
+                <span class="stat-label" title="Telefon ile Web arası DataChannel gecikmesi (Ping)">Uçtan Uca
+                    Gecikme:</span>
+                <span class="stat-value" id="e2e-val">-</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label" title="LiveKit Sunucusuna olan Gecikme (RTT)">Sunucu Gecikmesi (RTT):</span>
+                <span class="stat-value" id="rtt-val">-</span>
+            </div>
+            <div class="stat-row" id="jitter-row" style="display: none;">
+                <span class="stat-label">Jitter:</span>
+                <span class="stat-value" id="jitter-val">-</span>
+            </div>
+            <div class="stat-row" id="loss-row" style="display: none;">
+                <span class="stat-label">Paket Kaybı:</span>
+                <span class="stat-value" id="loss-val">-</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Video Kalitesi:</span>
+                <span class="stat-value" id="fps-val">-</span>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -107,6 +168,107 @@
         // We will fetch the token and the LiveKit Server URL from our backend
         let livekitUrl = null;
         let room = null;
+
+        let statsInterval;
+        let e2ePings = [];
+
+        function setupAdvancedStats(room, role) {
+            const statsContainer = document.getElementById('stats-container');
+            const e2eVal = document.getElementById('e2e-val');
+            statsContainer.style.display = 'block';
+
+            if (role === 'viewer') {
+                document.getElementById('jitter-row').style.display = 'flex';
+                document.getElementById('loss-row').style.display = 'flex';
+            } else {
+                e2eVal.innerText = "İzleyicide görünür";
+            }
+
+            // Data channel ping-pong for E2E latency
+            if (role === 'viewer') {
+                setInterval(() => {
+                    if (room.state === 'connected') {
+                        try {
+                            const strData = JSON.stringify({ type: 'ping', t: Date.now() });
+                            const encoder = new TextEncoder();
+                            room.localParticipant.publishData(encoder.encode(strData), { reliable: false });
+                        } catch (e) { }
+                    }
+                }, 1000);
+            }
+
+            room.on(LivekitClient.RoomEvent.DataReceived, (payload, participant, kind, topic) => {
+                try {
+                    const strData = new TextDecoder().decode(payload);
+                    const msg = JSON.parse(strData);
+
+                    if (role === 'broadcaster' && msg.type === 'ping') {
+                        // Reply with pong
+                        const reply = JSON.stringify({ type: 'pong', t: msg.t });
+                        room.localParticipant.publishData(new TextEncoder().encode(reply), { reliable: false });
+                    } else if (role === 'viewer' && msg.type === 'pong') {
+                        // Calculate E2E latency (Round Trip)
+                        const rttE2e = Date.now() - msg.t;
+
+                        // rolling average of last 3 pings
+                        e2ePings.push(rttE2e);
+                        if (e2ePings.length > 3) e2ePings.shift();
+                        const avgE2e = Math.round(e2ePings.reduce((a, b) => a + b, 0) / e2ePings.length);
+
+                        e2eVal.innerText = avgE2e + ' ms';
+                    }
+                } catch (e) { }
+            });
+
+            // WebRTC RTCStats polling
+            statsInterval = setInterval(async () => {
+                if (room.state !== 'connected') return;
+
+                let rtt = 0;
+                let jitter = 0;
+                let packetsLost = 0;
+                let fps = 0;
+                let width = 0;
+                let height = 0;
+
+                try {
+                    let pc = null;
+                    if (room.engine && room.engine.pcManager) {
+                        pc = role === 'broadcaster' ? room.engine.pcManager.publisher.pc : room.engine.pcManager.subscriber.pc;
+                    }
+
+                    if (pc) {
+                        const stats = await pc.getStats();
+                        stats.forEach(report => {
+                            if (role === 'viewer' && report.type === 'inbound-rtp' && report.kind === 'video') {
+                                if (report.jitter) jitter = report.jitter * 1000;
+                                if (report.packetsLost) packetsLost = report.packetsLost;
+                                if (report.framesPerSecond) fps = report.framesPerSecond;
+                                if (report.frameWidth) width = report.frameWidth;
+                                if (report.frameHeight) height = report.frameHeight;
+                            }
+                            if (role === 'broadcaster' && report.type === 'outbound-rtp' && report.kind === 'video') {
+                                if (report.framesPerSecond) fps = report.framesPerSecond;
+                                if (report.frameWidth) width = report.frameWidth;
+                                if (report.frameHeight) height = report.frameHeight;
+                            }
+                            if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+                                if (report.currentRoundTripTime) rtt = report.currentRoundTripTime * 1000;
+                            }
+                        });
+
+                        if (rtt > 0) document.getElementById('rtt-val').innerText = Math.round(rtt) + ' ms';
+                        if (jitter > 0) document.getElementById('jitter-val').innerText = jitter.toFixed(2) + ' ms';
+                        if (packetsLost !== undefined) document.getElementById('loss-val').innerText = packetsLost;
+
+                        let qStr = '-';
+                        if (width > 0 && height > 0) qStr = `${width}x${height}`;
+                        if (fps > 0) qStr += ` @ ${fps.toFixed(1)} FPS`;
+                        if (qStr !== '-') document.getElementById('fps-val').innerText = qStr;
+                    }
+                } catch (e) { }
+            }, 1000);
+        }
 
         async function fetchToken(role) {
             const response = await fetch('/token?role=' + role);
@@ -134,6 +296,8 @@
 
                 await room.connect(livekitUrl, token);
                 statusEl.innerText = "Connected! Accessing camera...";
+
+                setupAdvancedStats(room, 'broadcaster');
 
                 const localVideoTrack = await LivekitClient.createLocalVideoTrack({
                     facingMode: 'environment', // Use the back camera
@@ -196,6 +360,8 @@
 
                 await room.connect(livekitUrl, token);
                 statusEl.innerText = "Connected to room. Waiting for phone to join...";
+
+                setupAdvancedStats(room, 'viewer');
 
             } catch (err) {
                 statusEl.innerText = "Error: " + err.message;
