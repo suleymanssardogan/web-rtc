@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebRTC Phone to Web</title>
+    <title>WebRTC Phone to Web (LiveKit)</title>
     <style>
         :root {
             --bg-color: #0d1117;
@@ -57,18 +57,6 @@
             min-height: 20px;
         }
 
-        .latency-box {
-            margin-top: 10px;
-            font-size: 1em;
-            color: #ff7b72;
-            display: none;
-            background: rgba(0, 0, 0, 0.3);
-            padding: 10px;
-            border-radius: 8px;
-            text-align: left;
-            line-height: 1.5;
-        }
-
         #qr-container {
             display: none;
             flex-direction: column;
@@ -91,12 +79,14 @@
     </style>
     <!-- Include QRCode.js for generating QR code -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <!-- Include LiveKit Client API -->
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
 </head>
 
 <body>
 
     <div class="container">
-        <h1 id="title">WebRTC Live Stream</h1>
+        <h1 id="title">LiveKit Video Stream</h1>
 
         <div id="qr-container">
             <p class="instruction">Scan this QR code with your phone to start broadcasting your camera</p>
@@ -106,253 +96,64 @@
         <video id="videoElement" autoplay playsinline muted></video>
 
         <div class="status" id="status">Starting...</div>
-        <div class="latency-box" id="latency">Latency: -- ms</div>
     </div>
 
     <script>
-        const wsProtocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
-        const wsUrl = wsProtocol + location.host + '/ws';
-        let ws;
-
         const videoElement = document.getElementById('videoElement');
         const statusEl = document.getElementById('status');
         const qrContainer = document.getElementById('qr-container');
         const titleEl = document.getElementById('title');
-        const latencyEl = document.getElementById('latency');
 
-        let latencyInterval = null;
-        let role = null;
-        let localStream = null;
+        // We will fetch the token and the LiveKit Server URL from our backend
+        let livekitUrl = null;
+        let room = null;
 
-        const rtcConfig = {
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' },
-                // Add TURN servers to bypass Mobile Network (Symmetric NAT) firewalls
-                {
-                    urls: 'turn:openrelay.metered.ca:80',
-                    username: 'openrelayproject',
-                    credential: 'openrelayproject'
-                },
-                {
-                    urls: 'turn:openrelay.metered.ca:443',
-                    username: 'openrelayproject',
-                    credential: 'openrelayproject'
-                },
-                {
-                    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-                    username: 'openrelayproject',
-                    credential: 'openrelayproject'
-                }
-            ]
-        };
-
-        const peerConnections = {};
-        let viewerPC = null;
-
-        function connectWebSocket() {
-            ws = new WebSocket(wsUrl);
-
-            ws.onmessage = async (event) => {
-                const msg = JSON.parse(event.data);
-
-                if (role === 'broadcaster') {
-                    if (msg.type === 'new_viewer') {
-                        const viewerId = msg.viewer_id;
-                        statusEl.innerText = `Viewers connected. Broadcasting live.`;
-
-                        const pc = new RTCPeerConnection(rtcConfig);
-                        peerConnections[viewerId] = pc;
-
-                        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-
-                        pc.onicecandidate = e => {
-                            if (e.candidate) {
-                                ws.send(JSON.stringify({
-                                    type: 'candidate',
-                                    target: 'viewer',
-                                    target_id: viewerId,
-                                    candidate: e.candidate
-                                }));
-                            }
-                        };
-
-                        const offer = await pc.createOffer();
-
-                        // Send offer before generating candidates via setLocalDescription to avoid UDP/WS race conditions
-                        ws.send(JSON.stringify({
-                            type: 'offer',
-                            target_id: viewerId,
-                            sdp: offer
-                        }));
-
-                        await pc.setLocalDescription(offer);
-
-                    } else if (msg.type === 'answer') {
-                        const pc = peerConnections[msg.viewer_id];
-                        if (pc) await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-
-                    } else if (msg.type === 'candidate') {
-                        const pc = peerConnections[msg.viewer_id];
-                        if (pc) await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
-
-                    } else if (msg.type === 'viewer_disconnected') {
-                        const pc = peerConnections[msg.viewer_id];
-                        if (pc) {
-                            pc.close();
-                            delete peerConnections[msg.viewer_id];
-                        }
-                    }
-
-                } else if (role === 'viewer') {
-                    if (msg.type === 'offer') {
-                        qrContainer.style.display = 'none'; // Hide QR when stream arrives
-                        videoElement.style.display = 'block';
-                        statusEl.innerText = "Receiving stream offer...";
-
-                        viewerPC = new RTCPeerConnection(rtcConfig);
-
-                        viewerPC.ontrack = e => {
-                            videoElement.srcObject = e.streams[0];
-                            videoElement.play().catch(console.error);
-                            statusEl.innerText = "Live! Connected to phone camera. (Video muted to allow auto-play)";
-                            statusEl.style.color = "#2ea043";
-                            latencyEl.style.display = "block";
-
-                            // Start measuring latency every second
-                            if (latencyInterval) clearInterval(latencyInterval);
-                            latencyInterval = setInterval(async () => {
-                                if (viewerPC && viewerPC.connectionState === 'connected') {
-                                    const stats = await viewerPC.getStats();
-
-                                    let networkRtt = null;
-                                    let videoJitter = null;
-                                    let totalLatency = null;
-
-                                    stats.forEach(report => {
-                                        // 1. Ağ (Network) gecikmesi (Ping / STUN)
-                                        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
-                                            if (report.currentRoundTripTime !== undefined) {
-                                                networkRtt = (report.currentRoundTripTime * 1000).toFixed(1);
-                                            }
-                                        }
-
-                                        // 2. Video akış gecikmesi (Jitter Buffer Delay & Decode time)
-                                        if (report.type === 'inbound-rtp' && report.kind === 'video') {
-                                            if (report.jitterBufferDelay !== undefined && report.jitterBufferEmittedCount !== undefined) {
-                                                const jitterDelayMs = (report.jitterBufferDelay / report.jitterBufferEmittedCount) * 1000;
-                                                videoJitter = jitterDelayMs.toFixed(1);
-                                            }
-                                        }
-                                    });
-
-                                    let html = "";
-                                    if (networkRtt) html += `<b>Network Latency (RTT):</b> ${networkRtt} ms<br>`;
-                                    if (videoJitter && !isNaN(videoJitter)) {
-                                        let estimatedTotal = (parseFloat(networkRtt || 0) / 2) + parseFloat(videoJitter);
-                                        html += `<b>Video Jitter Buffer:</b> ${videoJitter} ms<br>`;
-                                        html += `<b>Estimated Stream Delay:</b> ~${estimatedTotal.toFixed(1)} ms`;
-                                    }
-
-                                    if (html !== "") {
-                                        latencyEl.innerHTML = html;
-                                    }
-                                }
-                            }, 1000);
-                        };
-
-                        viewerPC.onicecandidate = e => {
-                            if (e.candidate) {
-                                ws.send(JSON.stringify({
-                                    type: 'candidate',
-                                    target: 'broadcaster',
-                                    candidate: e.candidate
-                                }));
-                            }
-                        };
-
-                        viewerPC.onconnectionstatechange = () => {
-                            if (viewerPC.connectionState === 'disconnected' || viewerPC.connectionState === 'failed') {
-                                statusEl.innerText = "Stream disconnected. Waiting for broadcaster...";
-                                statusEl.style.color = "red";
-                                videoElement.style.display = 'none';
-                                qrContainer.style.display = 'flex'; // Show QR again
-                                latencyEl.style.display = 'none';
-                                if (latencyInterval) clearInterval(latencyInterval);
-                            }
-                        };
-
-                        await viewerPC.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-                        const answer = await viewerPC.createAnswer();
-
-                        ws.send(JSON.stringify({ type: 'answer', sdp: answer }));
-                        await viewerPC.setLocalDescription(answer);
-
-                    } else if (msg.type === 'candidate') {
-                        if (viewerPC) await viewerPC.addIceCandidate(new RTCIceCandidate(msg.candidate));
-
-                    } else if (msg.type === 'broadcaster_disconnected') {
-                        statusEl.innerText = "Phone disconnected. Waiting for connection...";
-                        statusEl.style.color = "orange";
-                        if (viewerPC) viewerPC.close();
-                        videoElement.srcObject = null;
-                        videoElement.style.display = 'none';
-                        latencyEl.style.display = 'none';
-                        qrContainer.style.display = 'flex'; // Show QR again
-                        if (latencyInterval) clearInterval(latencyInterval);
-
-                    } else if (msg.type === 'error') {
-                        statusEl.innerText = msg.message;
-                        statusEl.style.color = "orange";
-                    }
-                }
-            };
-
-            ws.onopen = () => {
-                console.log('WebSocket connected');
-                if (role === 'broadcaster') {
-                    ws.send(JSON.stringify({ type: 'register_broadcaster' }));
-                } else if (role === 'viewer') {
-                    ws.send(JSON.stringify({ type: 'register_viewer' }));
-                }
-            };
-
-            ws.onclose = () => {
-                if (role) {
-                    statusEl.innerText = "Disconnected from server. Reconnecting...";
-                    statusEl.style.color = "red";
-                    setTimeout(connectWebSocket, 3000);
-                }
-            };
+        async function fetchToken(role) {
+            const response = await fetch('/token?role=' + role);
+            if (!response.ok) throw new Error("Could not fetch token");
+            const data = await response.json();
+            livekitUrl = data.url; // Save the dynamic URL from server
+            return data.token;
         }
 
         async function startBroadcaster() {
-            role = 'broadcaster';
             titleEl.innerText = "Phone Camera Streaming";
-            videoElement.style.display = 'block';
-            videoElement.muted = true; // Don't feedback
             qrContainer.style.display = 'none';
+            videoElement.style.display = 'block';
+            videoElement.muted = true; // Mute locally
 
             try {
-                statusEl.innerText = "Requesting camera access...";
-                // Prefer back camera
-                localStream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'environment' },
-                    audio: true
+                statusEl.innerText = "Getting authorization token...";
+                const token = await fetchToken("broadcaster");
+
+                statusEl.innerText = "Connecting to LiveKit server...";
+                room = new LivekitClient.Room({
+                    adaptiveStream: true,
+                    dynacast: true
                 });
-                videoElement.srcObject = localStream;
-                statusEl.innerText = "Broadcasting... Waiting for viewers.";
+
+                await room.connect(livekitUrl, token);
+                statusEl.innerText = "Connected! Accessing camera...";
+
+                const localVideoTrack = await LivekitClient.createLocalVideoTrack({
+                    facingMode: 'environment', // Use the back camera
+                    resolution: LivekitClient.VideoPresets.h720.resolution,
+                });
+
+                await room.localParticipant.publishTrack(localVideoTrack);
+                localVideoTrack.attach(videoElement);
+
+                statusEl.innerText = "Live! Broadcasting camera to viewers.";
                 statusEl.style.color = "#58a6ff";
 
-                connectWebSocket();
             } catch (err) {
-                statusEl.innerText = "Error accessing camera: " + err.message;
+                statusEl.innerText = "Error: " + err.message;
                 statusEl.style.color = "red";
+                console.error(err);
             }
         }
 
-        function startViewer() {
-            role = 'viewer';
+        async function startViewer() {
             titleEl.innerText = "Viewer Display";
 
             // Show QR code for phone to scan
@@ -360,25 +161,49 @@
             const broadcastUrl = window.location.origin + window.location.pathname + "?role=broadcaster";
 
             try {
-                // Clear inside in case we recall
                 const qrcodeContainer = document.getElementById("qrcode");
                 qrcodeContainer.innerHTML = "";
-
-                // Use robust external API for QR instead of relying on client-side JS that adblockers block
                 const qrImgUrl = "https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=" + encodeURIComponent(broadcastUrl);
                 const img = document.createElement("img");
                 img.src = qrImgUrl;
                 qrcodeContainer.appendChild(img);
 
-                statusEl.innerText = "Waiting for phone to scan QR code...";
-                connectWebSocket();
+                statusEl.innerText = "Getting authorization token...";
+                const token = await fetchToken("viewer");
+
+                statusEl.innerText = "Connecting to LiveKit server...";
+
+                room = new LivekitClient.Room();
+
+                room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+                    if (track.kind === LivekitClient.Track.Kind.Video) {
+                        qrContainer.style.display = 'none';
+                        videoElement.style.display = 'block';
+                        track.attach(videoElement);
+
+                        statusEl.innerText = "Live! Receiving stream from phone.";
+                        statusEl.style.color = "#2ea043";
+                    }
+                });
+
+                room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
+                    track.detach(videoElement);
+                    videoElement.style.display = 'none';
+                    qrContainer.style.display = 'flex';
+                    statusEl.innerText = "Phone disconnected. Waiting...";
+                    statusEl.style.color = "orange";
+                });
+
+                await room.connect(livekitUrl, token);
+                statusEl.innerText = "Connected to room. Waiting for phone to join...";
+
             } catch (err) {
-                statusEl.innerText = "Error starting viewer: " + err.message;
+                statusEl.innerText = "Error: " + err.message;
                 statusEl.style.color = "red";
+                console.error(err);
             }
         }
 
-        // Initialize based on URL params
         const urlParams = new URLSearchParams(window.location.search);
         if (urlParams.get('role') === 'broadcaster') {
             startBroadcaster();
